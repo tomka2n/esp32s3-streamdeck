@@ -1,0 +1,17 @@
+diff --git a/src/lgfx/v1/platforms/esp32s3/Bus_RGB.cpp b/src/lgfx/v1/platforms/esp32s3/Bus_RGB.cpp
+index 43dd6b0..bfbcf22 100644
+--- a/src/lgfx/v1/platforms/esp32s3/Bus_RGB.cpp
++++ b/src/lgfx/v1/platforms/esp32s3/Bus_RGB.cpp
+@@ -95,7 +95,11 @@ namespace lgfx
+ 
+   static void _gpio_pin_sig(uint32_t pin, uint32_t sig)
+   {
+-    gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[pin], PIN_FUNC_GPIO);
++    //gpio_hal_iomux_func_sel(GPIO_PIN_MUX_REG[pin], PIN_FUNC_GPIO);
++    gpio_hal_context_t gpio_hal = {
++      .dev = GPIO_HAL_GET_HW(GPIO_PORT_0)
++    };
++    gpio_hal_func_sel(&gpio_hal, pin, PIN_FUNC_GPIO);
+     gpio_set_direction((gpio_num_t)pin, GPIO_MODE_OUTPUT);
+     esp_rom_gpio_connect_out_signal(pin, sig, false, false);
+   }
