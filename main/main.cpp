@@ -4,11 +4,13 @@
 #include "freertos/task.h"
 #include "tinyusb.h"
 #include "class/hid/hid_device.h"
+#include "tusb_cdc_acm.h"
 #include "LGFX_WAVESHARE_ESP32S3TouchLCD2_SPI_ST7789T3_I2C_CST816D.hpp"
 static LGFX_WAVESHARE_ESP32S3TouchLCD2_SPI_ST7789T3_I2C_CST816D lcd;
 static const char *TAG = "test";
+static uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1];
 
-#define TUSB_DESC_TOTAL_LEN      (TUD_CONFIG_DESC_LEN + CFG_TUD_HID * TUD_HID_DESC_LEN)
+#define TUSB_DESC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + CFG_TUD_CDC * TUD_CDC_DESC_LEN + CFG_TUD_HID * TUD_HID_DESC_LEN)
 
 // --- 1. ディスクリプタの定義 ---
 // PCに対して「私はキーボードである」と名乗るためのデータです
@@ -17,13 +19,14 @@ const uint8_t hid_report_descriptor[] = {
 };
 
 // 文字列ディスクリプタ（PC上で表示される名前など）
-static const char* hid_string_descriptor[5] = {
+static const char* usb_string_descriptor[] = {
     // 0: 言語ID (0x0409 = English)
     (const char[]) {0x09, 0x04},
     "TinyUSB",                  // 1: 製造元
     "StreamDeck-like keyboard", // 2: 製品名
     "123456",                   // 3: シリアル番号
-    "SDL HID Keyboard"          // 4: インターフェース名
+    "HID Keyboard(StreamDeck)", // 4: HIDインターフェース用
+    "USB Serial(StreamDeck)"    // 5: CDCインターフェース用
 };
 
 /**
@@ -31,6 +34,18 @@ static const char* hid_string_descriptor[5] = {
  *
  * This is a simple configuration descriptor that defines 1 configuration and 1 HID interface
  */
+
+static const uint8_t composite_configuration_descriptor[] = {
+    // 1. Configuration Descriptor (インターフェース数3)
+    // CDCは2つのインターフェース（Control & Data）を占有するため計3になる
+    TUD_CONFIG_DESCRIPTOR(1, 3, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
+    // 2. HID Interface Descriptor (インターフェース番号 0, 文字列ディスクリプタ 4 を使用)
+    TUD_HID_DESCRIPTOR(0, 4, false, sizeof(hid_report_descriptor), 0x81, 16, 10),
+    // 3. CDC Interface Descriptor (インターフェース番号 1,2, 文字列ディスクリプタ 5 を使用)
+    // 0x82, 0x83 など、HIDと被らないエンドポイントを割り当てる
+    TUD_CDC_DESCRIPTOR(1, 5, 0x82, 8, 0x03, 0x83, 64),
+};
+/*
 static const uint8_t hid_configuration_descriptor[] = {
     // Configuration number, interface count, string index, total length, attribute, power in mA
     TUD_CONFIG_DESCRIPTOR(1, 1, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
@@ -39,19 +54,99 @@ static const uint8_t hid_configuration_descriptor[] = {
     TUD_HID_DESCRIPTOR(0, 4, false, sizeof(hid_report_descriptor), 0x81, 16, 10),
 };
 
+*/
+
+/**
+ * @brief Application Queue
+ */
+static QueueHandle_t app_queue;
+typedef struct {
+    uint8_t buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1];     // Data buffer
+    size_t buf_len;                                     // Number of bytes received
+    uint8_t itf;                                        // Index of CDC device interface
+} app_message_t;
+
+/**
+ * @brief CDC device RX callback
+ *
+ * CDC device signals, that new data were received
+ *
+ * @param[in] itf   CDC device index
+ * @param[in] event CDC event type
+ */
+void tinyusb_cdc_rx_callback(int itf, cdcacm_event_t *event)
+{
+    /* initialization */
+    size_t rx_size = 0;
+
+    /* read */
+    esp_err_t ret = tinyusb_cdcacm_read((tinyusb_cdcacm_itf_t)itf, rx_buf, CONFIG_TINYUSB_CDC_RX_BUFSIZE, &rx_size);
+    if (ret == ESP_OK) {
+
+        /*
+        app_message_t tx_msg = {
+            .buf = {},
+            .buf_len = rx_size,
+            .itf = (uint8_t)itf,
+        };
+        */
+
+        /* Copy received message to application queue buffer */
+        //memcpy(tx_msg.buf, rx_buf, rx_size);
+        //xQueueSend(app_queue, &tx_msg, 0);
+
+    } else {
+        ESP_LOGE(TAG, "Read Error");
+    }
+}
+
+/**
+ * @brief CDC device line change callback
+ *
+ * CDC device signals, that the DTR, RTS states changed
+ *
+ * @param[in] itf   CDC device index
+ * @param[in] event CDC event type
+ */
+void tinyusb_cdc_line_state_changed_callback(int itf, cdcacm_event_t *event)
+{
+    int dtr = event->line_state_changed_data.dtr;
+    int rts = event->line_state_changed_data.rts;
+    ESP_LOGI(TAG, "Line state changed on channel %d: DTR:%d, RTS:%d", itf, dtr, rts);
+}
+
 // --- 2. USB HID の初期化 ---
-void init_usb_hid() {
-    const tinyusb_config_t tusb_cfg = {
+void init_usb_composite_device() {
+    static const tinyusb_config_t tusb_cfg = {
         .device_descriptor = NULL,
-        .string_descriptor = hid_string_descriptor,
-        .string_descriptor_count = sizeof(hid_string_descriptor)/sizeof(hid_string_descriptor[0]),
+        .string_descriptor = usb_string_descriptor,
+        .string_descriptor_count = sizeof(usb_string_descriptor)/sizeof(usb_string_descriptor[0]),
         .external_phy = false,
-        .configuration_descriptor = hid_configuration_descriptor,
-        //.configuration_descriptor = NULL,
+        .configuration_descriptor = composite_configuration_descriptor,
         .self_powered = false,
         .vbus_monitor_io = -1,
     };
     ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
+
+    static tinyusb_config_cdcacm_t acm_cfg = {
+        .usb_dev = TINYUSB_USBDEV_0,
+        .cdc_port = TINYUSB_CDC_ACM_0,
+        .rx_unread_buf_sz = 64,
+        .callback_rx = &tinyusb_cdc_rx_callback, // the first way to register a callback
+        .callback_rx_wanted_char = NULL,
+        .callback_line_state_changed = NULL,
+        .callback_line_coding_changed = NULL
+    };
+
+    ESP_ERROR_CHECK(tusb_cdc_acm_init(&acm_cfg));
+    /* the second way to register a callback */
+    ESP_ERROR_CHECK(tinyusb_cdcacm_register_callback(
+                        TINYUSB_CDC_ACM_0,
+                        CDC_EVENT_LINE_STATE_CHANGED,
+                        &tinyusb_cdc_line_state_changed_callback));
+
+    // ログをUSB CDCに転送する設定（sdkconfig CONFIG_TINYUSB_CDC_ENABLED=y の設定が必要）
+    //esp_log_set_vprintf(vprintf);
 }
 
 // Invoked when received GET HID REPORT DESCRIPTOR request
@@ -83,7 +178,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
 // --- 指定したキーコードを送信する関数 ---
 void send_keyboard_key(uint8_t modifier, uint8_t keycode) {
     if (!tud_hid_ready()) {
-        printf("USB HID not ready yet...\n");
+        ESP_LOGW(TAG, "USB HID not ready yet...\n");
         return;
     }
     // 1. キーを押した状態を送信
@@ -136,6 +231,15 @@ void drawButtons() {
 }
 
 extern "C" void app_main(void) {
+
+    /*
+    app_queue = xQueueCreate(5, sizeof(app_message_t));
+    assert(app_queue);
+    app_message_t msg;
+    */
+    init_usb_composite_device();
+    vTaskDelay(pdMS_TO_TICKS(500));
+
     lcd.init();
     lcd.setRotation(1); // 横向き設定
     lcd.fillScreen(TFT_BLACK);
@@ -143,9 +247,8 @@ extern "C" void app_main(void) {
     setupButtons();
     drawButtons();
 
-    init_usb_hid();
     
-    printf("Stream Deck Ready!\n");
+    ESP_LOGI(TAG, "Stream Deck Ready!\n");
 
     while (true) {
         uint16_t tx, ty;
@@ -155,7 +258,7 @@ extern "C" void app_main(void) {
                 if (tx >= buttons[i].x && tx < (buttons[i].x + buttons[i].w) &&
                     ty >= buttons[i].y && ty < (buttons[i].y + buttons[i].h)) {
                     
-                    printf("Button %d Pressed! (Key: %d)\n", i, buttons[i].key_code);
+                    ESP_LOGI(TAG, "Button %d Pressed! (Key: %d)\n", i, buttons[i].key_code);
                     send_keyboard_key(0, buttons[i].key_code);
 
                     // 視覚的フィードバック（一瞬色を変えるなど）
