@@ -5,12 +5,29 @@
 #include "tinyusb.h"
 #include "class/hid/hid_device.h"
 #include "tusb_cdc_acm.h"
+#include "tusb_console.h"
 #include "LGFX_WAVESHARE_ESP32S3TouchLCD2_SPI_ST7789T3_I2C_CST816D.hpp"
 static LGFX_WAVESHARE_ESP32S3TouchLCD2_SPI_ST7789T3_I2C_CST816D lcd;
 static const char *TAG = "test";
 static uint8_t rx_buf[CONFIG_TINYUSB_CDC_RX_BUFSIZE + 1];
 
 #define TUSB_DESC_TOTAL_LEN  (TUD_CONFIG_DESC_LEN + CFG_TUD_CDC * TUD_CDC_DESC_LEN + CFG_TUD_HID * TUD_HID_DESC_LEN)
+
+// インターフェース番号の定義
+enum {
+    ITF_NUM_HID = 0,
+    ITF_NUM_CDC,
+    ITF_NUM_CDC_DATA,
+    ITF_NUM_TOTAL
+};
+
+// エンドポイント番号の定義
+enum {
+    EPNUM_HID_IN = 0x81,
+    EPNUM_CDC_NOTIF = 0x82,
+    EPNUM_CDC_OUT = 0x02,
+    EPNUM_CDC_IN = 0x83,
+};
 
 // --- 1. ディスクリプタの定義 ---
 // PCに対して「私はキーボードである」と名乗るためのデータです
@@ -40,10 +57,9 @@ static const uint8_t composite_configuration_descriptor[] = {
     // CDCは2つのインターフェース（Control & Data）を占有するため計3になる
     TUD_CONFIG_DESCRIPTOR(1, 3, 0, TUSB_DESC_TOTAL_LEN, TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, 100),
     // 2. HID Interface Descriptor (インターフェース番号 0, 文字列ディスクリプタ 4 を使用)
-    TUD_HID_DESCRIPTOR(0, 4, false, sizeof(hid_report_descriptor), 0x81, 16, 10),
+    TUD_HID_DESCRIPTOR(ITF_NUM_HID, 4, false, sizeof(hid_report_descriptor), EPNUM_HID_IN, 16, 10),
     // 3. CDC Interface Descriptor (インターフェース番号 1,2, 文字列ディスクリプタ 5 を使用)
-    // 0x82, 0x83 など、HIDと被らないエンドポイントを割り当てる
-    TUD_CDC_DESCRIPTOR(1, 5, 0x82, 8, 0x03, 0x83, 64),
+    TUD_CDC_DESCRIPTOR(ITF_NUM_CDC, 5, EPNUM_CDC_NOTIF, 8, EPNUM_CDC_OUT, EPNUM_CDC_IN, 64),
 };
 /*
 static const uint8_t hid_configuration_descriptor[] = {
@@ -146,7 +162,7 @@ void init_usb_composite_device() {
                         &tinyusb_cdc_line_state_changed_callback));
 
     // ログをUSB CDCに転送する設定（sdkconfig CONFIG_TINYUSB_CDC_ENABLED=y の設定が必要）
-    //esp_log_set_vprintf(vprintf);
+    ESP_ERROR_CHECK(esp_tusb_init_console(TINYUSB_CDC_ACM_0));
 }
 
 // Invoked when received GET HID REPORT DESCRIPTOR request
